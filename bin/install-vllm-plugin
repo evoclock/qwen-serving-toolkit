@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+dest=${1:-${QWEN_PLUGIN_DIR:-/tmp/qwen3-budgeted}}
+
+install -d "$dest"
+install -m 0644 "$root/src/qwen_budget_policy.py" "$dest/qwen_budget_policy.py"
+install -m 0644 "$root/src/qwen3_thinking_budget.py" "$dest/qwen3_thinking_budget.py"
+printf 'Installed Qwen3 budget plugin files in %s\n' "$dest"
+printf 'Register parser name: qwen3_budgeted\n'

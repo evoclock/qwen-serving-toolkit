@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[Unit]
+Description=Qwen-compatible model service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/your/serve-command
+Restart=no
+TimeoutStartSec=1800
+TimeoutStopSec=180
+
+# Keep this unit on-demand unless you explicitly want it at login.
+# Do not put credentials or host-specific tunnel addresses in this template.

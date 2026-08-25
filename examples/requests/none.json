@@ -1,0 +1,8 @@
+{
+  "model": "qwen3-family",
+  "messages": [
+    {"role": "user", "content": "Reply with exactly: ready"}
+  ],
+  "chat_template_kwargs": {"enable_thinking": false},
+  "max_completion_tokens": 32
+}

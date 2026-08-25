@@ -1,0 +1,8 @@
+{
+  "model": "qwen3-family",
+  "messages": [
+    {"role": "user", "content": "Explain the deployment plan in five concise bullets."}
+  ],
+  "reasoning_effort": "low",
+  "max_completion_tokens": 1024
+}

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -euo pipefail
+
+if [[ -n "${MODELCTL_CONFIG:-}" ]]; then
+  # This is an explicitly selected local config file, not a repository file.
+  # shellcheck disable=SC1090
+  source "$MODELCTL_CONFIG"
+fi
+
+action=${1:?usage: modelctl <start|stop|status|logs|clear-cache>}
+unit=${MODEL_UNIT:?set MODEL_UNIT or MODELCTL_CONFIG}
+model_id=${MODEL_ID:?set MODEL_ID or MODELCTL_CONFIG}
+endpoint=${MODEL_ENDPOINT:-http://127.0.0.1:8000}
+runtime=${MODEL_RUNTIME:-vllm}
+timeout=${MODEL_READY_TIMEOUT:-1800}
+models_url="$endpoint/v1/models"
+
+owns_endpoint() {
+  curl -fsS --connect-timeout 2 --max-time 5 "$models_url" 2>/dev/null |
+    python3 -c 'import json,sys; expected=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(x.get("id") == expected for x in data.get("data", [])) else 1)' "$model_id" 2>/dev/null
+}
+
+wait_ready() {
+  local n=$((timeout / 2))
+  for _ in $(seq 1 "$n"); do
+    owns_endpoint && return 0
+    systemctl --user is-active --quiet "$unit" || return 1
+    sleep 2
+  done
+  return 1
+}
+
+active_requests() {
+  local metrics running waiting
+  metrics=$(curl -fsS --connect-timeout 2 --max-time 5 "$endpoint/metrics") || return 1
+  case "$runtime" in
+    vllm)
+      running=$(awk '$1 ~ /^vllm:num_requests_running/ {sum += $2} END {print sum + 0}' <<<"$metrics")
+      waiting=$(awk '$1 ~ /^vllm:num_requests_waiting/ {sum += $2} END {print sum + 0}' <<<"$metrics")
+      ;;
+    sglang)
+      running=$(awk '$1 ~ /^sglang:num_running_reqs/ {sum += $2} END {print sum + 0}' <<<"$metrics")
+      waiting=$(awk '$1 ~ /^sglang:num_queue_reqs/ {sum += $2} END {print sum + 0}' <<<"$metrics")
+      ;;
+    *) echo "unsupported MODEL_RUNTIME=$runtime" >&2; return 1 ;;
+  esac
+  printf '%s %s\n' "$running" "$waiting"
+}
+
+case "$action" in
+  start)
+    systemctl --user start "$unit"
+    wait_ready || { echo "model did not become ready" >&2; exit 1; }
+    echo "ready: $model_id at $endpoint/v1"
+    ;;
+  stop)
+    systemctl --user stop "$unit"
+    echo "stopped: $unit"
+    ;;
+  status)
+    systemctl --user status "$unit" --no-pager || true
+    if owns_endpoint; then curl -fsS "$models_url"; else echo "endpoint not serving $model_id"; fi
+    ;;
+  logs)
+    exec journalctl --user -u "$unit" -n 200 -f
+    ;;
+  clear-cache)
+    owns_endpoint || { echo "refusing: endpoint is not owned by $model_id" >&2; exit 1; }
+    read -r running waiting < <(active_requests)
+    if (( running > 0 || waiting > 0 )); then
+      echo "refusing: $running running and $waiting queued request(s)" >&2
+      exit 1
+    fi
+    systemctl --user restart "$unit"
+    wait_ready || { echo "model did not become ready after restart" >&2; exit 1; }
+    echo "cache cleared by safe service restart: $model_id"
+    ;;
+  *) echo "unknown action: $action" >&2; exit 2 ;;
+esac
