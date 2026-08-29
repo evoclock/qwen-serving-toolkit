@@ -4,7 +4,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-dest=${1:-${QWEN_PLUGIN_DIR:-/tmp/qwen3-budgeted}}
+dest=${1:-${QWEN_PLUGIN_DIR:-$HOME/.local/share/qwen-serving-toolkit/qwen3-budgeted}}
 
 install -d "$dest"
 install -m 0644 "$root/src/qwen_budget_policy.py" "$dest/qwen_budget_policy.py"

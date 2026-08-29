@@ -1,11 +1,8 @@
-# SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-# SPDX-License-Identifier: AGPL-3.0-or-later
+"""vLLM adapter for bounded Qwen-family reasoning.
 
-"""vLLM adapter for bounded Qwen3-family reasoning.
-
-The vLLM V1 sampler understands Qwen3 ``<think>...</think>`` state and forces
-``</think>`` when ``request.thinking_token_budget`` is reached. This adapter
-only resolves the request budget and registers the parser name.
+The adapter resolves Pi/OpenAI-style ``reasoning_effort`` into the same hard
+reasoning-token budgets used by the llama.cpp Qwen38fn server. vLLM's Qwen3
+reasoning parser performs the actual ``</think>`` boundary enforcement.
 """
 
 from __future__ import annotations
@@ -15,7 +12,7 @@ import sys
 from pathlib import Path
 
 # When vLLM loads this file directly from a plugin directory, make the sibling
-# pure-policy module importable too.
+# dependency-free policy module importable too.
 _plugin_dir = str(Path(__file__).resolve().parent)
 if _plugin_dir not in sys.path:
     sys.path.insert(0, _plugin_dir)

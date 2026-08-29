@@ -1,33 +1,33 @@
 # Qwen thinking budgets
 
-Qwen3-family models commonly expose two phases: a reasoning phase wrapped in
+Qwen3-family models expose two phases: a reasoning phase wrapped in
 `<think>...</think>` and a final answer. A total completion limit does not
 prevent the model from spending almost all of its response budget thinking.
 
-This toolkit adds a server-side vLLM reasoning adapter that sets
-`request.thinking_token_budget`. The vLLM V1 sampler counts tokens while the
-model is inside the thinking phase and forces the closing `</think>` token when
-the budget is reached. The model then continues with the normal answer.
+The vLLM adapter in this toolkit sets `request.thinking_token_budget`. vLLM's
+V1 reasoning parser counts tokens while the model is inside the thinking phase
+and forces the closing `</think>` boundary when the budget is reached. The
+budget limits reasoning only; it does not cap the final answer, and the model
+may close reasoning earlier.
 
-The budget limits reasoning only; it does not cap the final answer. The model
-may close its reasoning earlier.
+## Profiles
 
-## Action profile
+The legacy `action` profile is retained for existing production aliases. The
+`qwen38fn` and `corpus` profiles use the larger ladder intended for Qwen3.8
+Flash-Next and selected teacher captures:
 
-The intended production profile is deliberately bounded:
+| Request effort | Legacy `action` | `qwen38fn` / `corpus` |
+|---|---:|---:|
+| `none` | 0 | 0 |
+| `minimal` | 128 | 512 |
+| `low` | 256 | 1,024 |
+| `medium` | 384 | 4,096 |
+| `high` | 512 | 8,192 |
+| `xhigh`/`max` | 512 | 16,384 |
 
-| Request effort | Thinking budget |
-|---|---:|
-| `none` | 0 |
-| `minimal` | 128 |
-| `low` | 256 |
-| `medium` | 384 |
-| `high` | 512 |
-| `max` | 512 |
-
-The adapter accepts `reasoning_effort` either as a request field or inside
+`reasoning_effort` is accepted as a request field or inside
 `chat_template_kwargs`. A request may also provide `thinking_token_budget`; it
-is clamped to the profile ceiling.
+is clamped to the active profile ceiling.
 
 ```json
 {
@@ -38,7 +38,7 @@ is clamped to the profile ceiling.
 }
 ```
 
-To disable thinking entirely, use the model/template's supported toggle:
+Use the model/template's supported toggle to disable thinking entirely:
 
 ```json
 {"chat_template_kwargs": {"enable_thinking": false}}
@@ -47,21 +47,42 @@ To disable thinking entirely, use the model/template's supported toggle:
 ## Server configuration
 
 The adapter is registered as `qwen3_budgeted` and is passed to vLLM with its
-reasoning-parser plugin option. `QWEN_THINKING_PROFILE=action` is the default.
-A separate `corpus` profile is available for data capture, with larger budgets;
-it should not be used on an interactive action seat.
+reasoning-parser plugin option. `QWEN_THINKING_PROFILE=action` is the default;
+the Qwen3.8 Flash-Next vLLM recipe selects `qwen38fn`, while a dedicated
+corpus lane selects `corpus`.
 
 `QWEN_THINKING_TOKEN_BUDGET=N` makes one fixed budget the default and ceiling.
 `QWEN_THINKING_TOKEN_BUDGET=-1` disables automatic bounding for a dedicated
-capture process only. Do not use that setting on a production action service.
+capture process only. Never use that setting on an action seat.
 
-## SGLang/DFlash2
+## Distillation capture and top-5 logprobs
 
-The Qwen3.8 SGLang/DFlash2 path does not use the vLLM adapter. It uses the
-runtime's strict-thinking switch and `SGLANG_MAX_THINK_TOKENS` as a global
-reasoning-phase ceiling. The same conceptual distinction applies: the ceiling
-limits the thinking phase, while the request's completion budget limits the
-whole response.
+Use `bin/qwen-distill-capture` for selected difficult, no-tools teacher
+requests. It sends a non-streaming completion with:
+
+- the selected finite reasoning budget;
+- `include_reasoning=true` and `return_token_ids=true`;
+- opt-in `logprobs=true` and `top_logprobs=5`;
+- session/request headers for provenance;
+- no tool definitions or tool calls.
+
+The capture record contains the prompt/messages, separated reasoning, answer,
+token IDs, chosen-token logprob, at most five alternatives per token, request
+and response metadata, and inferred budget/termination diagnostics. It uses a
+persistent JSONL output path and a 512 MiB output quota by default. It never
+requests or stores full-vocabulary logits.
+
+A forced budget boundary is marked separately from a natural model closure.
+For training, prefer natural-termination records or filter budget-terminated
+records according to the intended curriculum. Top-5 logprobs are useful soft
+labels and uncertainty signals, but they are not sufficient to reconstruct an
+exact full-vocabulary KL objective.
+
+The llama.cpp Qwen38fn implementation follows the same contract through
+`patches/llama-cpp-qwen38fn-observability.patch`: normal tool-streaming
+requests keep `n_probs=0`; explicit no-tools, non-streaming diagnostics can
+combine reasoning budgets and top-5 logprobs. Its server-owned traces are
+available at `/v1/reasoning-traces`.
 
 ## Compatibility and limitations
 
@@ -70,5 +91,7 @@ whole response.
 - This is a verbosity/latency control, not a quality guarantee.
 - A small thinking budget can truncate useful reasoning; compare task quality
   at each effort level before changing a production default.
+- MTP and logprobs may be backend/version dependent; distillation capture
+  disables tools and streaming for predictable alignment.
 - Prompt instructions can still make the final answer verbose. Use a concise
   output instruction and an appropriate completion limit for that problem.

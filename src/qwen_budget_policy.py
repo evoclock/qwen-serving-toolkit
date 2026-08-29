@@ -1,16 +1,12 @@
-# SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-# SPDX-License-Identifier: AGPL-3.0-or-later
-
-"""Pure policy logic for bounded Qwen3-family reasoning.
-
-This module intentionally has no vLLM dependency so the policy can be tested
-on a laptop or in CI without a model, CUDA, or a server.
-"""
+"""Shared effort-to-budget policy for Qwen vLLM serving and capture."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
+# ``action`` preserves the existing production vLLM contract. The new
+# qwen38fn and corpus profiles opt into the larger, common effort ladder used
+# by the llama.cpp Qwen38fn service.
 PROFILES: Mapping[str, Mapping[str, int]] = {
     "action": {
         "default": 512,
@@ -22,15 +18,25 @@ PROFILES: Mapping[str, Mapping[str, int]] = {
         "xhigh": 512,
         "max_effort": 512,
     },
+    "qwen38fn": {
+        "default": 512,
+        "max": 16384,
+        "minimal": 512,
+        "low": 1024,
+        "medium": 4096,
+        "high": 8192,
+        "xhigh": 16384,
+        "max_effort": 16384,
+    },
     "corpus": {
-        "default": 1024,
-        "max": 4096,
-        "minimal": 256,
-        "low": 512,
-        "medium": 1024,
-        "high": 2048,
-        "xhigh": 4096,
-        "max_effort": 4096,
+        "default": 4096,
+        "max": 16384,
+        "minimal": 512,
+        "low": 1024,
+        "medium": 4096,
+        "high": 8192,
+        "xhigh": 16384,
+        "max_effort": 16384,
     },
 }
 
@@ -42,14 +48,7 @@ def resolve_budget(
     explicit_budget: int | None = None,
     fixed_budget: int | None = None,
 ) -> int | None:
-    """Resolve a request's thinking budget.
-
-    ``fixed_budget`` models ``QWEN_THINKING_TOKEN_BUDGET``. ``None`` means
-    unset; ``-1`` means unbounded and should only be used by a dedicated
-    capture/corpus process. A normal integer is both the default and ceiling.
-    ``explicit_budget`` is a request-level value and is clamped to the active
-    profile ceiling.
-    """
+    """Resolve a request budget, returning ``None`` only for deliberate unbounded mode."""
     try:
         limits = PROFILES[profile.strip().lower()]
     except (AttributeError, KeyError) as exc:
@@ -62,13 +61,17 @@ def resolve_budget(
     if normalized_effort == "none":
         return 0
 
-    # -1 disables automatic selection for a dedicated capture process. An
-    # explicit request budget remains usable, but an unqualified request is
-    # intentionally unbounded.
     if fixed_budget == -1:
+        if explicit_budget is None:
+            return None
+        if explicit_budget < 0:
+            raise ValueError("explicit_budget must be non-negative")
         return explicit_budget
 
     maximum = fixed_budget if fixed_budget is not None else limits["max"]
+    if maximum < 0:
+        raise ValueError("fixed_budget must be >= 0 or -1")
+
     if explicit_budget is not None:
         if explicit_budget < 0:
             raise ValueError("explicit_budget must be non-negative")
