@@ -4,8 +4,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-const TRACE_ENDPOINT =
-	process.env.QWEN38FN_TRACE_URL ?? "http://127.0.0.1:8000/v1/reasoning-traces";
+const CONFIGURED_TRACE_ENDPOINT = process.env.QWEN38FN_TRACE_URL;
+const DEFAULT_TRACE_ENDPOINT = "http://127.0.0.1:8000/v1/reasoning-traces";
 const TRACE_TOKEN = process.env.QWEN38FN_TRACE_TOKEN;
 const MAX_TOOL_BYTES = 48_000;
 
@@ -71,20 +71,36 @@ function headers(): Record<string, string> {
 		: { Accept: "application/json" };
 }
 
-function completionsEndpoint(): URL {
-	if (process.env.QWEN38FN_API_URL) {
-		return new URL(`${process.env.QWEN38FN_API_URL.replace(/\/$/, "")}/v1/chat/completions`);
+function traceEndpointForBaseUrl(baseUrl?: string): string {
+	if (CONFIGURED_TRACE_ENDPOINT) return CONFIGURED_TRACE_ENDPOINT;
+	if (!baseUrl) return DEFAULT_TRACE_ENDPOINT;
+	try {
+		const url = new URL(baseUrl);
+		url.pathname = `${url.pathname.replace(/\/+$/, "")}/reasoning-traces`;
+		url.search = "";
+		return url.toString().replace(/\/$/, "");
+	} catch {
+		return DEFAULT_TRACE_ENDPOINT;
 	}
-	const url = new URL(TRACE_ENDPOINT);
+}
+
+function completionsEndpoint(traceEndpoint: string): URL {
+	if (process.env.QWEN38FN_API_URL) {
+		const configured = new URL(process.env.QWEN38FN_API_URL);
+		configured.pathname = `${configured.pathname.replace(/\/+$/, "")}/chat/completions`;
+		return configured;
+	}
+	const url = new URL(traceEndpoint);
 	url.pathname = url.pathname.replace(/\/reasoning-traces$/, "/chat/completions");
 	return url;
 }
 
 async function fetchTrace(
+	traceEndpoint: string,
 	query: Record<string, string | number | undefined>,
 	signal?: AbortSignal,
 ): Promise<{ value: unknown; contentType: string }> {
-	const url = new URL(TRACE_ENDPOINT);
+	const url = new URL(traceEndpoint);
 	for (const [key, value] of Object.entries(query)) {
 		if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
 	}
@@ -105,12 +121,13 @@ async function fetchTrace(
 async function runProbe(
 	params: TraceParams,
 	sessionId: string,
+	traceEndpoint: string,
 	signal?: AbortSignal,
 ): Promise<{ requestId: string; trace?: TraceRecord; response: unknown }> {
 	if (!params.prompt) throw new Error("action=probe requires prompt");
 	const budget = params.budget ?? 512;
 	const requestId = `pi-probe-${randomUUID()}`;
-	const url = completionsEndpoint();
+	const url = completionsEndpoint(traceEndpoint);
 	const body = {
 		model: process.env.QWEN38FN_MODEL ?? "qwen3.8-flash-next",
 		messages: [{ role: "user", content: params.prompt }],
@@ -143,7 +160,7 @@ async function runProbe(
 		throw new Error(`${response.status} ${response.statusText}: ${responseText.slice(0, 500)}`);
 	}
 	const value = JSON.parse(responseText);
-	const trace = await findTrace(requestId, sessionId, signal);
+	const trace = await findTrace(traceEndpoint, requestId, sessionId, signal);
 	return { requestId, trace, response: value };
 }
 
@@ -189,10 +206,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function findTrace(requestId: string, sessionId: string, signal?: AbortSignal): Promise<TraceRecord | undefined> {
+async function findTrace(traceEndpoint: string, requestId: string, sessionId: string, signal?: AbortSignal): Promise<TraceRecord | undefined> {
 	for (let attempt = 0; attempt < 8; attempt++) {
 		try {
-			const result = await fetchTrace({ request_id: requestId, session_id: sessionId, limit: 5 }, signal);
+			const result = await fetchTrace(traceEndpoint, { request_id: requestId, session_id: sessionId, limit: 5 }, signal);
 			const traces = (result.value as TraceList)?.traces ?? [];
 			const match = traces.find((trace) => trace.request_id === requestId);
 			if (match) return match;
@@ -205,8 +222,10 @@ async function findTrace(requestId: string, sessionId: string, signal?: AbortSig
 	return undefined;
 }
 
+type PendingRequest = { requestId: string; traceEndpoint: string };
+
 export default function (pi: ExtensionAPI) {
-	const pendingRequestIds: string[] = [];
+	const pendingRequests: PendingRequest[] = [];
 
 	pi.registerTool({
 		name: "qwen38fn_trace",
@@ -238,7 +257,8 @@ export default function (pi: ExtensionAPI) {
 
 			if (params.action === "probe") {
 				const sessionId = ctx.sessionManager.getSessionId();
-				const probe = await runProbe(params, sessionId, signal);
+				const traceEndpoint = traceEndpointForBaseUrl(ctx.model?.baseUrl);
+				const probe = await runProbe(params, sessionId, traceEndpoint, signal);
 				const summary = {
 					saved: Boolean(probe.trace),
 					trace_id: probe.trace?.id,
@@ -252,7 +272,7 @@ export default function (pi: ExtensionAPI) {
 				if (probe.trace) {
 					pi.appendEntry("qwen38fn-reasoning-trace", {
 						status: "saved",
-						endpoint: TRACE_ENDPOINT,
+						endpoint: traceEndpoint,
 						trace_id: probe.trace.id,
 						session_id: sessionId,
 						request_id: probe.requestId,
@@ -264,11 +284,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				return {
 					content: [{ type: "text", text: renderToolOutput(summary) }],
-					details: { endpoint: TRACE_ENDPOINT, action: "probe", ...summary },
+					details: { endpoint: traceEndpoint, action: "probe", ...summary },
 				};
 			}
 
+			const traceEndpoint = traceEndpointForBaseUrl(ctx.model?.baseUrl);
 			const result = await fetchTrace(
+				traceEndpoint,
 				{
 					id: params.id,
 					format: params.action === "get" && params.format === "text" ? "text" : undefined,
@@ -285,7 +307,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: renderToolOutput(value) }],
 				details: {
-					endpoint: TRACE_ENDPOINT,
+					endpoint: traceEndpoint,
 					action: params.action,
 					id: params.id,
 				},
@@ -299,9 +321,10 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.model?.provider !== "qwen38fn") return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const requestId = `pi-${randomUUID()}`;
+		const traceEndpoint = traceEndpointForBaseUrl(ctx.model?.baseUrl);
 		event.headers["X-Session-ID"] = sessionId;
 		event.headers["X-Request-ID"] = requestId;
-		pendingRequestIds.push(requestId);
+		pendingRequests.push({ requestId, traceEndpoint });
 	});
 
 	// Copy the authoritative server-side diagnostic into the local Pi session
@@ -309,15 +332,16 @@ export default function (pi: ExtensionAPI) {
 	// to the model, so they cannot inflate long-context prompts.
 	pi.on("message_end", async (event, ctx) => {
 		if (event.message.role !== "assistant") return;
-		const requestId = pendingRequestIds.shift();
-		if (!requestId) return;
+		const pending = pendingRequests.shift();
+		if (!pending) return;
+		const { requestId, traceEndpoint } = pending;
 		const sessionId = ctx.sessionManager.getSessionId();
 		try {
-			const trace = await findTrace(requestId, sessionId, ctx.signal);
+			const trace = await findTrace(traceEndpoint, requestId, sessionId, ctx.signal);
 			const entry: TraceEntry = trace
 				? {
 					  status: "saved",
-					  endpoint: TRACE_ENDPOINT,
+					  endpoint: traceEndpoint,
 					  trace_id: trace.id,
 					  session_id: sessionId,
 					  request_id: requestId,
@@ -327,7 +351,7 @@ export default function (pi: ExtensionAPI) {
 				  }
 				: {
 					  status: "unavailable",
-					  endpoint: TRACE_ENDPOINT,
+					  endpoint: traceEndpoint,
 					  session_id: sessionId,
 					  request_id: requestId,
 					  error: "No matching Spark trace became visible before timeout",
