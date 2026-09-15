@@ -72,5 +72,8 @@ skills directory. Set the private `QWEN38FN_TRACE_URL` client-side when the
 server is remote, then use `/skill:qwen38fn-traces`. The extension uses native
 `fetch()` and does not use `curl`, SSH, or shell wrappers.
 
-This project is licensed under the GNU Affero General Public License version
-3 or later, with the author-attribution terms in `LICENSE`.
+This project is licensed under AGPL-3.0-only with the author-attribution
+terms in `LICENSE`. Commercial use, forks, and substantial modifications are
+permitted when all AGPL and attribution obligations are followed. A separate
+commercial licence is available for organisations requiring proprietary
+modifications or other terms incompatible with the AGPL.
